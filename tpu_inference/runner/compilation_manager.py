@@ -385,6 +385,17 @@ class CompilationManager:
                                                sharding=dp_sharding)
         else:
             mamba_state_indices = None
+        # Match `_prepare_inputs`: the spec-decode mamba fields are set iff
+        # the model has mamba layers and spec decoding is enabled.
+        mamba_slot_read_offsets = self.runner.mamba_slot_read_offsets
+        if mamba_slot_read_offsets is not None:
+            mamba_request_distribution = device_array(self.runner.mesh,
+                                                      np.array([0, 0, 0] *
+                                                               dp_size,
+                                                               dtype=np.int32),
+                                                      sharding=dp_sharding)
+        else:
+            mamba_request_distribution = None
 
         def build_block_table(kv_cache_gid: int) -> jax.Array:
             block_table_obj = self.runner.input_batch.block_table[kv_cache_gid]
@@ -405,6 +416,8 @@ class CompilationManager:
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
+                mamba_slot_read_offsets=mamba_slot_read_offsets,
+                mamba_request_distribution=mamba_request_distribution,
                 padded_num_reqs=num_reqs,
             )
 
@@ -1157,12 +1170,38 @@ class CompilationManager:
         self._precompile_process_and_extend_logits()
         self._precompile_extend_logits_simple()
         self._precompile_select_from_array_spec_decode()
+        self._precompile_update_mamba_slot_read_offsets()
         if self.runner.speculative_config.method == "eagle3":
             self._precompile_eagle3_helpers()
         elif self.runner.speculative_config.method == "dflash":
             self._precompile_dflash_helpers()
         elif self.runner.speculative_config.method == "mtp":
             self._precompile_mtp_helpers()
+
+    def _precompile_update_mamba_slot_read_offsets(self) -> None:
+        if self.runner.mamba_slot_read_offsets is None:
+            return
+        logger.info("Compiling _update_mamba_slot_read_offsets_fn.")
+        from tpu_inference.runner.tpu_runner import \
+            _update_mamba_slot_read_offsets_fn
+        data_parallel_attn_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+        state_indices = self._create_dummy_tensor(
+            (self.runner.max_num_reqs, ),
+            jnp.int32,
+            sharding=data_parallel_attn_sharding)
+        read_offsets = self._create_dummy_tensor(
+            (self.runner.max_num_reqs, ),
+            jnp.int32,
+            sharding=data_parallel_attn_sharding)
+        self._run_compilation(
+            f"worker{self.runner.rank} _update_mamba_slot_read_offsets_fn",
+            _update_mamba_slot_read_offsets_fn,
+            self.runner.mamba_slot_read_offsets,
+            state_indices,
+            read_offsets,
+            self.runner.mesh,
+        )
 
     def _precompile_select_from_array_spec_decode(self) -> None:
         logger.info("Compiling select_from_array with different input shapes.")
@@ -1400,6 +1439,17 @@ class CompilationManager:
                 sharding=dp_sharding)
         else:
             eagle3_mamba_state_indices = None
+        # The drafter's metadata is derived from the target metadata via
+        # `dataclasses.replace`, so the spec-decode mamba fields (unused by
+        # the pure-attention drafter) are still part of its pytree signature.
+        eagle3_mamba_slot_read_offsets = self.runner.mamba_slot_read_offsets
+        if eagle3_mamba_slot_read_offsets is not None:
+            eagle3_mamba_request_distribution = device_array(
+                self.runner.mesh,
+                np.array([0, 0, 0] * dp_size, dtype=np.int32),
+                sharding=dp_sharding)
+        else:
+            eagle3_mamba_request_distribution = None
 
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
@@ -1417,6 +1467,9 @@ class CompilationManager:
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
                     mamba_state_indices=eagle3_mamba_state_indices,
+                    mamba_slot_read_offsets=eagle3_mamba_slot_read_offsets,
+                    mamba_request_distribution=(
+                        eagle3_mamba_request_distribution),
                     padded_num_reqs=num_reqs,
                 )
 
@@ -1536,6 +1589,17 @@ class CompilationManager:
                                                sharding=dp_sharding)
         else:
             mamba_state_indices = None
+        # See the eagle3 precompile above: the drafter metadata inherits the
+        # spec-decode mamba fields from the target metadata via `replace`.
+        mamba_slot_read_offsets = self.runner.mamba_slot_read_offsets
+        if mamba_slot_read_offsets is not None:
+            mamba_request_distribution = device_array(self.runner.mesh,
+                                                      np.array([0, 0, 0] *
+                                                               dp_size,
+                                                               dtype=np.int32),
+                                                      sharding=dp_sharding)
+        else:
+            mamba_request_distribution = None
 
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
@@ -1561,6 +1625,8 @@ class CompilationManager:
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
                     mamba_state_indices=mamba_state_indices,
+                    mamba_slot_read_offsets=mamba_slot_read_offsets,
+                    mamba_request_distribution=mamba_request_distribution,
                     padded_num_reqs=num_reqs,
                 )
 
@@ -1659,6 +1725,14 @@ class CompilationManager:
                 sharding=dp_sharding)
         else:
             dflash_mamba_state_indices = None
+        dflash_mamba_slot_read_offsets = self.runner.mamba_slot_read_offsets
+        if dflash_mamba_slot_read_offsets is not None:
+            dflash_mamba_request_distribution = device_array(
+                self.runner.mesh,
+                np.array([0, 0, 0] * dp_size, dtype=np.int32),
+                sharding=dp_sharding)
+        else:
+            dflash_mamba_request_distribution = None
 
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
@@ -1695,6 +1769,8 @@ class CompilationManager:
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
                     mamba_state_indices=dflash_mamba_state_indices,
+                    mamba_slot_read_offsets=dflash_mamba_slot_read_offsets,
+                    mamba_request_distribution=dflash_mamba_request_distribution,
                     padded_num_reqs=num_reqs,
                 )
 
@@ -1754,6 +1830,9 @@ class CompilationManager:
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
                     mamba_state_indices=dflash_mamba_state_indices,
+                    mamba_slot_read_offsets=dflash_mamba_slot_read_offsets,
+                    mamba_request_distribution=(
+                        dflash_mamba_request_distribution),
                     padded_num_reqs=num_reqs,
                 )
 
