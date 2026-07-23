@@ -1620,13 +1620,15 @@ def _mla_ragged_paged_attention_kernel(
                           sz=sz,
                           vmem_ref=vmem_ref,
                           sem=sem):
-                    topk_src = topk_indices_ref.at[pl.ds(q_len_start, sz)]
+                    sz_aligned = pl.multiple_of(sz, 8)
+                    topk_src = topk_indices_ref.at[pl.ds(
+                        q_len_start, sz_aligned)]
                     if topk_indices_ref.ndim == 3:
-                        topk_src = topk_indices_ref.at[pl.ds(q_len_start, sz),
-                                                       0]
+                        topk_src = topk_indices_ref.at[
+                            pl.ds(q_len_start, sz_aligned), 0]
                     _async_copy(
                         topk_src,
-                        vmem_ref.at[pl.ds(0, sz)],
+                        vmem_ref.at[pl.ds(0, sz_aligned)],
                         sem,
                         wait,
                     )
