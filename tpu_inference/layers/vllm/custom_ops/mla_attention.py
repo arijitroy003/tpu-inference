@@ -190,9 +190,12 @@ class VllmMLAAttention(MLAAttention):
 
         # Get the KV cache
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
-        kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index[
-            self.layer_name]
-        kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
+        kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index.get(
+            self.layer_name, 0)
+        if vllm_model_wrapper_context.kv_caches and kv_cache_index < len(vllm_model_wrapper_context.kv_caches):
+            kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
+        else:
+            kv_cache = None
 
         # Get the mesh
         mesh = vllm_model_wrapper_context.mesh
