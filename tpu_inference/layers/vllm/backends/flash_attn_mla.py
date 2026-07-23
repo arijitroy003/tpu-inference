@@ -181,8 +181,17 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
                                   k_scale=k_scale)
         k_pe = k_pe.squeeze(1)
         topk_indices = kwargs.get("topk_indices", None)
-        topk_indices_jax = jax_view(
-            topk_indices) if topk_indices is not None else None
+        if topk_indices is not None:
+            if isinstance(topk_indices, (jnp.ndarray, np.ndarray)):
+                topk_indices_jax = topk_indices
+            elif hasattr(topk_indices, "as_jax"):
+                topk_indices_jax = topk_indices.as_jax()
+            elif isinstance(topk_indices, torch.Tensor):
+                topk_indices_jax = jnp.asarray(topk_indices.detach().cpu().numpy())
+            else:
+                topk_indices_jax = jax_view(topk_indices)
+        else:
+            topk_indices_jax = None
 
         new_kv_cache, outputs = mla_attention(
             q_nope,
