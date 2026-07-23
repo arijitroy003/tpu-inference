@@ -85,7 +85,7 @@ class VllmSparseAttnIndexer(SparseAttnIndexer):
             data_spec,  # cu_q_lens
             data_spec,  # distribution
         )
-        out_specs = data_spec  # topk_indices
+        out_specs = P(ShardingAxisName.ATTN_DATA, None, None)  # topk_indices
 
         topk_tokens = getattr(self, "topk_tokens", 2048)
         compress_ratio = getattr(self, "compress_ratio", 1)
@@ -122,4 +122,5 @@ class VllmSparseAttnIndexer(SparseAttnIndexer):
             attn_metadata.request_distribution,
         )
 
+        topk_indices = topk_indices.reshape(topk_indices.shape[0], 1, -1)
         return torch_view(topk_indices)

@@ -913,7 +913,8 @@ def mla_attention(
         md.block_tables, md.query_start_loc, md.request_distribution
     ]
     if topk_indices is not None:
-        in_specs_list.append(P(ShardingAxisName.ATTN_DATA))
+        in_specs_list.append(
+            P(ShardingAxisName.ATTN_DATA, *([None] * (topk_indices.ndim - 1))))
         call_args.append(topk_indices)
 
     in_specs = tuple(in_specs_list)

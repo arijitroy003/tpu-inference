@@ -1620,8 +1620,12 @@ def _mla_ragged_paged_attention_kernel(
                           sz=sz,
                           vmem_ref=vmem_ref,
                           sem=sem):
+                    topk_src = topk_indices_ref.at[pl.ds(q_len_start, sz)]
+                    if topk_indices_ref.ndim == 3:
+                        topk_src = topk_indices_ref.at[pl.ds(q_len_start, sz),
+                                                       0]
                     _async_copy(
-                        topk_indices_ref.at[pl.ds(q_len_start, sz)],
+                        topk_src,
                         vmem_ref.at[pl.ds(0, sz)],
                         sem,
                         wait,
@@ -2530,7 +2534,8 @@ def mla_ragged_paged_attention(
         )
 
         if topk_indices is None:
-            topk_indices = jnp.zeros((ql_nope.shape[0], 128), dtype=jnp.int32)
+            topk_indices = jnp.zeros((ql_nope.shape[0], 1, 128),
+                                     dtype=jnp.int32)
 
         in_specs.append(pl.BlockSpec(memory_space=pltpu.HBM))
         topk_scratch = pltpu.VMEM(
