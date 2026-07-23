@@ -14,16 +14,14 @@
 
 import atexit
 import copy
-import gc
 import multiprocessing
 import multiprocessing.reduction
 import os
-import signal
+import queue
+import threading
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from enum import Enum
-from multiprocessing import Process
-from multiprocessing.connection import Connection, wait
 from time import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -131,8 +129,8 @@ def _disable_cloudpickle():
 
 def _scheduler_worker_process(
     rank: int,
-    input_conn: Connection,
-    output_conn: Connection,
+    input_queue: Any,
+    output_queue: Any,
     vllm_config: Any,
     kv_cache_config: Any,
     structured_output_manager: Any,
@@ -143,12 +141,7 @@ def _scheduler_worker_process(
     log_stats: bool,
     original_scheduler_cls: type,
 ):
-    """Worker process that manages a single scheduler instance."""
-    import atexit
-    import gc
-    atexit._clear()
-    gc.enable()
-    # Initialize the scheduler in this process
+    """Worker thread that manages a single scheduler instance."""
     import inspect
     sig = inspect.signature(original_scheduler_cls)
     scheduler_kwargs = {
@@ -163,8 +156,6 @@ def _scheduler_worker_process(
     if "hash_block_size" in sig.parameters:
         scheduler_kwargs["hash_block_size"] = hash_block_size
 
-    import os
-
     enable_continue_decode = False
     if hasattr(vllm_config, "additional_config"):
         enable_continue_decode = vllm_config.additional_config.get(
@@ -178,16 +169,16 @@ def _scheduler_worker_process(
 
     _cached_scheduler_outputs: deque[SchedulerOutput] = deque()
 
-    logger.info(f"Scheduler worker process {rank} started (PID={os.getpid()})")
+    logger.info(f"Scheduler worker thread {rank} started")
 
     def _send_result(result):
-        """Send result back using cloudpickle serialization."""
-        output_conn.send_bytes(cloudpickle.dumps(result))
+        """Send result back via queue."""
+        output_queue.put(result)
 
-    # Process commands from the input connection
+    # Process commands from the input queue
     while True:
         try:
-            command, data = cloudpickle.loads(input_conn.recv_bytes())
+            command, data = input_queue.get()
 
             match command:
                 case SchedulerCommand.ADD_REQUEST:
@@ -454,34 +445,22 @@ class DPScheduler(SchedulerInterface):
 
         # Create worker processes with Pipe connections (no feeder threads).
         # multiprocessing.Queue uses background feeder threads for put(),
-        # which causes GIL contention and thread convoy effects at high DP
-        # sizes. Using raw Pipe connections eliminates all background threads.
-        ctx = multiprocessing.get_context('spawn')
-        self.input_conns: List[Connection] = []  # parent writes, child reads
-        self.output_conns: List[Connection] = []  # child writes, parent reads
-        self.processes: List[Process] = []
-
-        gc_was_enabled = gc.isenabled()
-        if gc_was_enabled:
-            gc.disable()
-        gc.freeze()
+        self.input_queues: List[queue.Queue] = []
+        self.output_queues: List[queue.Queue] = []
+        self.threads: List[threading.Thread] = []
 
         for rank in range(self.dp_size):
-            # Each pipe gives (parent_end, child_end)
-            # Input pipe: parent sends commands, child receives
-            input_parent_conn, input_child_conn = ctx.Pipe()
-            # Output pipe: child sends results, parent receives
-            output_parent_conn, output_child_conn = ctx.Pipe()
+            in_q = queue.Queue()
+            out_q = queue.Queue()
+            self.input_queues.append(in_q)
+            self.output_queues.append(out_q)
 
-            self.input_conns.append(input_parent_conn)
-            self.output_conns.append(output_parent_conn)
-
-            process = ctx.Process(
+            t = threading.Thread(
                 target=_scheduler_worker_process,
                 args=(
                     rank,
-                    input_child_conn,
-                    output_child_conn,
+                    in_q,
+                    out_q,
                     self.vllm_config,
                     self.per_rank_kv_cache_configs[rank],
                     structured_output_manager,
@@ -492,21 +471,10 @@ class DPScheduler(SchedulerInterface):
                     log_stats,
                     original_scheduler_cls,
                 ),
+                daemon=True,
             )
-            process.start()
-            # Close child ends in parent process
-            input_child_conn.close()
-            output_child_conn.close()
-            self.processes.append(process)
-
-        if gc_was_enabled:
-            gc.enable()
-
-        # Reverse mapping from output connection to rank for wait()-based collection.
-        self._output_conn_to_rank: Dict[int, int] = {
-            id(conn): rank
-            for rank, conn in enumerate(self.output_conns)
-        }
+            t.start()
+            self.threads.append(t)
 
         per_rank_max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
         global_max_tokens = per_rank_max_tokens * self.dp_size
@@ -528,16 +496,10 @@ class DPScheduler(SchedulerInterface):
         atexit.register(self._atexit_cleanup)
 
     def _atexit_cleanup(self) -> None:
-        """Kill worker processes if shutdown() was not called."""
-        for process in self.processes:
-            if process.is_alive():
-                try:
-                    os.kill(process.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-        for process in self.processes:
-            process.join(timeout=1.0)
-        multiprocessing.active_children()
+        """Cleanup worker threads if shutdown() was not called."""
+        for thread in getattr(self, 'threads', []):
+            if thread.is_alive():
+                thread.join(timeout=0.5)
 
     def _create_per_rank_configs(self, kv_cache_config: KVCacheConfig) -> None:
         self.per_rank_kv_cache_configs: List[KVCacheConfig] = []
@@ -550,79 +512,14 @@ class DPScheduler(SchedulerInterface):
                       rank: int,
                       command: SchedulerCommand,
                       data: Any = None) -> None:
-        """Send a command to a worker process via its input pipe."""
-        start_time = time()
-        payload = cloudpickle.dumps((command, data))
-        serialize_time = time() - start_time
-        self.input_conns[rank].send_bytes(payload)
-        send_time = time() - start_time
-        if serialize_time > 1.0 or send_time > 1.0:
-            logger.warning(
-                f"Slow IPC send ({send_time:.2f}s, serialize={serialize_time:.2f}s, "
-                f"{len(payload)} bytes) for '{command.value}' "
-                f"to rank {rank}/{self.dp_size} at step {self._schedule_step_count}."
-            )
+        """Send a command to a worker thread via its input queue."""
+        self.input_queues[rank].put((command, data))
 
     def _get_result(self,
                     rank: int,
                     command: Optional[SchedulerCommand] = None) -> Any:
-        """Get result from a worker process via its output pipe.
-
-        Uses raw Connection.recv_bytes() + cloudpickle.loads() instead of
-        multiprocessing.Queue.get(). This eliminates the background feeder
-        threads that Queue uses, avoiding GIL contention and thread convoy
-        effects at high DP sizes.
-        """
-        cmd_name = command.value if command else "unknown"
-        try:
-            start_time = time()
-            raw_bytes = self.output_conns[rank].recv_bytes()
-            recv_time = time()
-
-            gc_was_enabled = gc.isenabled()
-            if gc_was_enabled:
-                gc.disable()
-
-            result = cloudpickle.loads(raw_bytes)
-            deserialize_time = time()
-
-            if gc_was_enabled:
-                gc.enable()
-
-            end_time = time()
-            total_time = end_time - start_time
-            if total_time > 0.01:
-                pipe_wait = recv_time - start_time
-                deserialize = deserialize_time - recv_time
-                gc_overhead = end_time - deserialize_time
-                logger.warning(
-                    f"Long wait time ({total_time:.2f}s) for "
-                    f"rank {rank}/{self.dp_size} response to "
-                    f"'{cmd_name}' command at step {self._schedule_step_count} "
-                    f"(pipe_wait={pipe_wait:.2f}s, "
-                    f"deserialize={deserialize:.4f}s, "
-                    f"gc_re_enable={gc_overhead:.4f}s, "
-                    f"{len(raw_bytes)} bytes).")
-        except Exception as e:
-            # Check if the worker process is still alive for a better message
-            proc = self.processes[rank]
-            if not proc.is_alive():
-                exit_code = proc.exitcode
-                raise RuntimeError(
-                    f"Pipe error for rank {rank}: "
-                    f"Worker process (PID={proc.pid}) terminated with "
-                    f"exit code {exit_code}. "
-                    f"Step={self._schedule_step_count}, "
-                    f"cmd='{cmd_name}'. "
-                    "This may indicate a crash or signal in the scheduler "
-                    "worker process.") from e
-            raise RuntimeError(
-                f"Pipe error for rank {rank}: "
-                f"Worker process (PID={proc.pid}) terminated unexpectedly. "
-                f"Step={self._schedule_step_count}, "
-                f"cmd='{cmd_name}'. "
-                "This may indicate a crash in the scheduler worker process."
-            ) from e
+        """Get result from a worker thread via its output queue."""
+        result = self.output_queues[rank].get()
         if isinstance(result, SchedulerWorkerError):
             raise result
         return result
@@ -631,20 +528,10 @@ class DPScheduler(SchedulerInterface):
         self,
         command: SchedulerCommand,
     ) -> List[Any]:
-        """Collect results from all ranks using wait() to avoid HOL blocking."""
-        results: List[Any] = [None] * self.dp_size
-        pending = list(self.output_conns)
-        collected = 0
-
-        while collected < self.dp_size:
-            ready = wait(pending)
-            for conn in ready:
-                rank = self._output_conn_to_rank[id(conn)]
-                results[rank] = self._get_result(rank, command)
-                pending.remove(conn)
-                collected += 1
-
-        return results
+        """Collect results from all ranks."""
+        return [
+            self._get_result(rank, command) for rank in range(self.dp_size)
+        ]
 
     def _get_rank_pending_prefill_tokens(self) -> Dict[int, int]:
         """Per-rank sum of prefill tokens still owed (authoritative)."""
@@ -1529,52 +1416,24 @@ class DPScheduler(SchedulerInterface):
         )
 
     def shutdown(self) -> None:
-        """Shutdown all DP rank scheduler worker processes."""
+        """Shutdown all DP rank scheduler worker threads."""
         atexit.unregister(self._atexit_cleanup)
 
-        # Send shutdown command to all workers, skipping dead ones
+        # Send shutdown command to all workers
         for rank in range(self.dp_size):
-            if not self.processes[rank].is_alive():
-                logger.warning(
-                    f"Rank {rank}: Worker process already terminated "
-                    f"(exit code {self.processes[rank].exitcode}), "
-                    "skipping shutdown command.")
-                continue
             self._send_command(rank, SchedulerCommand.SHUTDOWN)
 
-        # Wait for acknowledgment (blocking), skipping dead ones
+        # Wait for acknowledgment
         for rank in range(self.dp_size):
-            if not self.processes[rank].is_alive():
-                continue
             try:
                 self._get_result(rank, SchedulerCommand.SHUTDOWN)
-            except (RuntimeError, OSError) as e:
+            except Exception as e:
                 logger.warning(
                     f"Rank {rank}: Failed to get shutdown acknowledgment: {e}")
 
-        # Terminate and join all processes
-        for process in self.processes:
-            process.join(timeout=5.0)
-            if process.is_alive():
-                try:
-                    os.kill(process.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                process.join(timeout=1.0)
-
-        # Close all pipe connections
-        for rank in range(self.dp_size):
-            try:
-                self.input_conns[rank].close()
-            except OSError:
-                pass
-            try:
-                self.output_conns[rank].close()
-            except OSError:
-                pass
-
-        # Restore original pickle
-        _disable_cloudpickle()
+        # Join all threads
+        for thread in self.threads:
+            thread.join(timeout=1.0)
 
 
 def update_vllm_config_for_dp_scheduler(vllm_config: Any) -> None:
