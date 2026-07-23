@@ -377,7 +377,9 @@ class CompilationManager:
         # populate for hybrid attn+mamba models — for pure-attention models we
         # pass None at runtime (see `_prepare_inputs`), and the precompile
         # primer must match that shape so the cached HLO is reused.
-        if self.runner.kv_cache_config.has_mamba_layers:
+        if getattr(
+                self.runner, "kv_cache_config", None
+        ) is not None and self.runner.kv_cache_config.has_mamba_layers:
             mamba_state_indices = device_array(self.runner.mesh,
                                                np.zeros(
                                                    self.runner.max_num_reqs,
