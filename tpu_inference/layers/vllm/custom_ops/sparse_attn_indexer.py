@@ -85,7 +85,7 @@ class VllmSparseAttnIndexer(SparseAttnIndexer):
             data_spec,  # cu_q_lens
             data_spec,  # distribution
         )
-        out_specs = P(ShardingAxisName.ATTN_DATA, None, None)  # topk_indices
+        out_specs = data_spec  # topk_indices
 
         topk_tokens = getattr(self, "topk_tokens", 2048)
         compress_ratio = getattr(self, "compress_ratio", 1)
