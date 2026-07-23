@@ -467,13 +467,22 @@ def _mla_ragged_paged_attention_kernel(
                 mask = jnp.logical_or(mask, q_span - sliding_window >= k_span)
             if topk_indices_x2_ref is not None:
                 bq_topk_indices_b = topk_indices_x2_ref[bq_sem_idx, b]
-                bq_topk_indices_b = jnp.broadcast_to(
+                topk_dim = bq_topk_indices_b.shape[-1]
+                chunk_size = 128
+                broadcast_topk = jnp.broadcast_to(
                     bq_topk_indices_b[:, None, :],
-                    (bq_sz, num_q_heads, bq_topk_indices_b.shape[-1]))
-                bq_topk_indices_b = bq_topk_indices_b.reshape(
-                    mask.shape[0], 1, bq_topk_indices_b.shape[-1])
-                valid_mask = jnp.any(bq_topk_indices_b == k_span[:, :, None],
-                                     axis=-1)
+                    (bq_sz, num_q_heads, topk_dim)).reshape(
+                        mask.shape[0], 1, topk_dim)
+                valid_mask = jnp.zeros((mask.shape[0], mask.shape[1]),
+                                       dtype=jnp.bool_)
+                for chunk_idx in range(0, topk_dim, chunk_size):
+                    tk_chunk = lax.dynamic_slice_in_dim(broadcast_topk,
+                                                        chunk_idx,
+                                                        chunk_size,
+                                                        axis=-1)
+                    chunk_valid = jnp.any(tk_chunk == k_span[:, :, None],
+                                          axis=-1)
+                    valid_mask = jnp.logical_or(valid_mask, chunk_valid)
                 mask = jnp.logical_or(mask, jnp.logical_not(valid_mask))
             mask_list.append(mask)
         mask = jnp.stack(mask_list, axis=0)
@@ -640,15 +649,24 @@ def _mla_ragged_paged_attention_kernel(
                 assert bq_sem_idx is not None and b is not None
                 bq_topk_indices_b = topk_indices_x2_ref[bq_sem_idx, b]
                 q_split_len = s.shape[0] // num_q_heads
+                topk_dim = bq_topk_indices_b.shape[-1]
+                chunk_size = 128
                 sliced_topk = bq_topk_indices_b[bq_offset:bq_offset +
                                                 q_split_len]
-                sliced_topk = jnp.broadcast_to(
+                broadcast_topk = jnp.broadcast_to(
                     sliced_topk[:, None, :],
-                    (q_split_len, num_q_heads, sliced_topk.shape[-1]))
-                sliced_topk = sliced_topk.reshape(s.shape[0], 1,
-                                                  sliced_topk.shape[-1])
-                valid_mask = jnp.any(sliced_topk == k_span[:, :, None],
-                                     axis=-1)
+                    (q_split_len, num_q_heads, topk_dim)).reshape(
+                        s.shape[0], 1, topk_dim)
+                valid_mask = jnp.zeros((s.shape[0], s.shape[1]),
+                                       dtype=jnp.bool_)
+                for chunk_idx in range(0, topk_dim, chunk_size):
+                    tk_chunk = lax.dynamic_slice_in_dim(broadcast_topk,
+                                                        chunk_idx,
+                                                        chunk_size,
+                                                        axis=-1)
+                    chunk_valid = jnp.any(tk_chunk == k_span[:, :, None],
+                                          axis=-1)
+                    valid_mask = jnp.logical_or(valid_mask, chunk_valid)
                 mask = jnp.logical_or(mask, jnp.logical_not(valid_mask))
             s = jnp.where(mask, mask_value, s)
         s_rowmax = jnp.max(s, axis=1, keepdims=True)
