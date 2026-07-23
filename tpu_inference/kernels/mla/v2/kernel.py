@@ -468,7 +468,7 @@ def _mla_ragged_paged_attention_kernel(
             if topk_indices_x2_ref is not None:
                 bq_topk_indices_b = topk_indices_x2_ref[bq_sem_idx, b]
                 topk_dim = bq_topk_indices_b.shape[-1]
-                chunk_size = 128
+                chunk_size = 512
                 broadcast_topk = jnp.broadcast_to(
                     bq_topk_indices_b[:, None, :],
                     (bq_sz, num_q_heads, topk_dim)).reshape(
@@ -648,7 +648,7 @@ def _mla_ragged_paged_attention_kernel(
                 bq_topk_indices_b = topk_indices_x2_ref[bq_sem_idx, b]
                 q_split_len = s.shape[0] // num_q_heads
                 topk_dim = bq_topk_indices_b.shape[-1]
-                chunk_size = 128
+                chunk_size = 512
                 sliced_topk = bq_topk_indices_b[bq_offset:bq_offset +
                                                 q_split_len]
                 broadcast_topk = jnp.broadcast_to(
