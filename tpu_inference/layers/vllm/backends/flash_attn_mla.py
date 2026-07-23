@@ -14,6 +14,7 @@
 from typing import Tuple
 
 import jax.numpy as jnp
+import numpy as np
 import torch
 from jax.sharding import Mesh
 from torchax.interop import jax_view, torch_view
