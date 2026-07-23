@@ -476,10 +476,8 @@ def _mla_ragged_paged_attention_kernel(
                 valid_mask = jnp.zeros((mask.shape[0], mask.shape[1]),
                                        dtype=jnp.bool_)
                 for chunk_idx in range(0, topk_dim, chunk_size):
-                    tk_chunk = lax.dynamic_slice_in_dim(broadcast_topk,
-                                                        chunk_idx,
-                                                        chunk_size,
-                                                        axis=-1)
+                    tk_chunk = broadcast_topk[:, :,
+                                              chunk_idx:chunk_idx + chunk_size]
                     chunk_valid = jnp.any(tk_chunk == k_span[:, :, None],
                                           axis=-1)
                     valid_mask = jnp.logical_or(valid_mask, chunk_valid)
@@ -660,10 +658,8 @@ def _mla_ragged_paged_attention_kernel(
                 valid_mask = jnp.zeros((s.shape[0], s.shape[1]),
                                        dtype=jnp.bool_)
                 for chunk_idx in range(0, topk_dim, chunk_size):
-                    tk_chunk = lax.dynamic_slice_in_dim(broadcast_topk,
-                                                        chunk_idx,
-                                                        chunk_size,
-                                                        axis=-1)
+                    tk_chunk = broadcast_topk[:, :,
+                                              chunk_idx:chunk_idx + chunk_size]
                     chunk_valid = jnp.any(tk_chunk == k_span[:, :, None],
                                           axis=-1)
                     valid_mask = jnp.logical_or(valid_mask, chunk_valid)
