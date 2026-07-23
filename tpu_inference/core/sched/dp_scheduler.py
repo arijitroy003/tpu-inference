@@ -456,7 +456,7 @@ class DPScheduler(SchedulerInterface):
         # multiprocessing.Queue uses background feeder threads for put(),
         # which causes GIL contention and thread convoy effects at high DP
         # sizes. Using raw Pipe connections eliminates all background threads.
-        ctx = multiprocessing.get_context('fork')
+        ctx = multiprocessing.get_context('spawn')
         self.input_conns: List[Connection] = []  # parent writes, child reads
         self.output_conns: List[Connection] = []  # child writes, parent reads
         self.processes: List[Process] = []
