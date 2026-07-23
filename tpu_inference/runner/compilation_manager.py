@@ -424,9 +424,10 @@ class CompilationManager:
 
         attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]
         shared_attention_metadata: SharedAttentionMetadata
-        if len(self.runner.kv_cache_config.kv_cache_groups) <= 1:
+        kv_cache_cfg = getattr(self.runner, "kv_cache_config", None)
+        if kv_cache_cfg is None or len(kv_cache_cfg.kv_cache_groups) <= 1:
             # Pooling model will not using kv cache
-            no_kv_cache = len(self.runner.kv_cache_config.kv_cache_groups) == 0
+            no_kv_cache = kv_cache_cfg is None or len(kv_cache_cfg.kv_cache_groups) == 0
             block_tables = build_block_table(0) if not no_kv_cache else None
             attention_metadata = build_attn(block_tables)
             shared_attention_metadata = build_shared_attn()
@@ -434,7 +435,7 @@ class CompilationManager:
             attention_metadata = {
                 name: build_attn(build_block_table(gid))
                 for gid, kv_cache_group in enumerate(
-                    self.runner.kv_cache_config.kv_cache_groups)
+                    kv_cache_cfg.kv_cache_groups)
                 for name in kv_cache_group.layer_names
             }
             shared_attention_metadata = build_shared_attn()
