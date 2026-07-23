@@ -508,8 +508,8 @@ class GDNAttentionTest(parameterized.TestCase):
 
         # All sequences continue an existing context (has_initial=True) for
         # the spec windows; prefills start fresh (context_len = 0).
-        seq_lens = jnp.array([16 + l
-                              for l in spec_lengths] + list(prefill_lengths),
+        seq_lens = jnp.array([16 + length for length in spec_lengths] +
+                             list(prefill_lengths),
                              dtype=jnp.int32)
 
         run_jitted = jax.jit(
@@ -596,9 +596,9 @@ class GDNAttentionTest(parameterized.TestCase):
         # Verify every written checkpoint slot; untouched slots must keep
         # their original contents.
         touched = set()
-        for i, l in enumerate(spec_lengths):
+        for i, length in enumerate(spec_lengths):
             base = int(state_indices[i])
-            touched.update(range(base, base + l))
+            touched.update(range(base, base + length))
         for i in range(len(prefill_lengths)):
             touched.add(int(state_indices[num_spec_seqs + i]))
         for slot in range(num_blocks):
